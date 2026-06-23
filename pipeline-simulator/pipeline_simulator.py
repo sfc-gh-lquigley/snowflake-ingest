@@ -153,9 +153,12 @@ async def main():
     airflow_sched_tp, airflow_sched_mp, airflow_sched_lp = create_service_telemetry("airflow-scheduler")
     airflow_worker_tp, _,               airflow_worker_lp = create_service_telemetry("airflow-worker")
     dbt_tp,           dbt_mp,           dbt_lp            = create_service_telemetry("dbt-cloud")
-    fivetran_tp,      fivetran_mp,      fivetran_lp       = create_service_telemetry("fivetran-connector")
-    snowpipe_tp,      snowpipe_mp,      snowpipe_lp       = create_service_telemetry("snowpipe-ingest")
-    snowflake_tp,     snowflake_mp,     _                 = create_service_telemetry("snowflake")
+    _,                fivetran_mp,      fivetran_lp       = create_service_telemetry("fivetran-connector")
+    _,                snowpipe_mp,      snowpipe_lp       = create_service_telemetry("snowpipe-ingest")
+    # "snowflake-monitor" keeps warehouse metrics isolated from the inferred "snowflake" node.
+    # Using service.name="snowflake" here would tag the resource with telemetry.sdk.language=python
+    # and cause Observe to display a Python badge on the inferred snowflake service node.
+    _,                wh_monitor_mp,    _                 = create_service_telemetry("snowflake-monitor")
     alertmgr_tp,      _,                alertmgr_lp       = create_service_telemetry("alertmanager")
 
     log_emitter = StructuredLogEmitter({
@@ -168,10 +171,10 @@ async def main():
     })
 
     airflow_sim   = AirflowSimulator(airflow_sched_tp, airflow_worker_tp, airflow_sched_mp, log_emitter.emit)
-    dbt_sim       = DbtSimulator(dbt_tp, snowflake_tp, dbt_mp, log_emitter.emit)
-    fivetran_sim  = FivetranSimulator(fivetran_tp, fivetran_mp, log_emitter.emit, snowflake_tp)
-    snowpipe_sim  = SnowpipeSimulator(snowpipe_tp, snowflake_tp, snowpipe_mp, log_emitter.emit)
-    warehouse_metrics = WarehouseMetricsSimulator(snowflake_mp)
+    dbt_sim       = DbtSimulator(dbt_tp, dbt_mp, log_emitter.emit)
+    fivetran_sim  = FivetranSimulator(fivetran_mp, log_emitter.emit)
+    snowpipe_sim  = SnowpipeSimulator(snowpipe_mp, log_emitter.emit)
+    warehouse_metrics = WarehouseMetricsSimulator(wh_monitor_mp)
     alert_sim     = AlertManagerSimulator(alertmgr_tp, log_emitter.emit)
 
     log.info("All simulators initialized. Starting event loops...")

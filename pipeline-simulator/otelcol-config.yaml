@@ -1,0 +1,130 @@
+# OpenTelemetry Collector — Pipeline Simulator
+#
+# This collector receives OTLP signals from the pipeline-simulator (and any other
+# OTel-instrumented services on the same host) and forwards them to Observe.
+#
+# Distribution: opentelemetry-collector-contrib
+# Install:  https://opentelemetry.io/docs/collector/installation/
+#
+# Usage:
+#   export OBSERVE_CUSTOMER_ID=<your-customer-id>
+#   export OBSERVE_TOKEN=<datastream-token>
+#   otelcol-contrib --config=otelcol-config.yaml
+#
+# Or with Docker:
+#   docker run --rm \
+#     -e OBSERVE_CUSTOMER_ID -e OBSERVE_TOKEN \
+#     -v $(pwd)/otelcol-config.yaml:/etc/otel/config.yaml \
+#     -p 4317:4317 -p 4318:4318 \
+#     otel/opentelemetry-collector-contrib \
+#     --config=/etc/otel/config.yaml
+
+receivers:
+  # Accept OTLP from any instrumented service on this host.
+  # The pipeline-simulator sends to http://localhost:4318 (HTTP).
+  # Java agents and other SDKs may use gRPC on 4317.
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # Optional: scrape host-level metrics (CPU, memory, disk, network).
+  # Useful for correlating pipeline performance with host resource usage in Observe.
+  hostmetrics:
+    collection_interval: 15s
+    scrapers:
+      cpu: {}
+      memory: {}
+      disk: {}
+      network: {}
+      load: {}
+      filesystem:
+        exclude_mount_points:
+          mount_points: [/proc/*, /sys/*]
+          match_type: regexp
+        exclude_fs_types:
+          fs_types: [autofs, binfmt_misc, bpf, cgroup, cgroup2, configfs,
+                     debugfs, devpts, hugetlbfs, mqueue, overlay, proc,
+                     securityfs, sysfs, tmpfs, tracefs]
+          match_type: strict
+
+processors:
+  # Detect cloud/host resource attributes and attach them to every signal.
+  # On EC2 this adds: cloud.provider, cloud.region, host.id, host.name, etc.
+  # Remove ec2 if running outside AWS; add gcp, azure, or system as needed.
+  resourcedetection:
+    detectors: [ec2, system]
+    timeout: 5s
+
+  # Buffer signals into larger batches before exporting.
+  # Reduces HTTP round-trips and improves throughput to Observe.
+  batch:
+    timeout: 10s
+    send_batch_size: 1000
+
+exporters:
+  # Observe accepts OTLP/HTTP directly.
+  # Each signal type uses the same endpoint but a different x-observe-target-package
+  # header, which routes data to the appropriate Observe package (Tracing, Metrics, Logs).
+  #
+  # Endpoint format: https://<OBSERVE_CUSTOMER_ID>.collect.observeinc.com/v2/otel
+  # Token format:    Bearer <datastream-token>  (create in Observe under Data > Datastreams)
+
+  otlphttp/traces:
+    endpoint: https://${env:OBSERVE_CUSTOMER_ID}.collect.observeinc.com/v2/otel
+    headers:
+      authorization: Bearer ${env:OBSERVE_TOKEN}
+      x-observe-target-package: Tracing
+    compression: zstd
+    retry_on_failure:
+      enabled: true
+    sending_queue:
+      num_consumers: 4
+      queue_size: 100
+
+  otlphttp/metrics:
+    endpoint: https://${env:OBSERVE_CUSTOMER_ID}.collect.observeinc.com/v2/otel
+    headers:
+      authorization: Bearer ${env:OBSERVE_TOKEN}
+      x-observe-target-package: Metrics
+    compression: zstd
+    retry_on_failure:
+      enabled: true
+    sending_queue:
+      num_consumers: 4
+      queue_size: 100
+
+  otlphttp/logs:
+    endpoint: https://${env:OBSERVE_CUSTOMER_ID}.collect.observeinc.com/v2/otel
+    headers:
+      authorization: Bearer ${env:OBSERVE_TOKEN}
+      x-observe-target-package: Host Explorer
+    compression: zstd
+    retry_on_failure:
+      enabled: true
+    sending_queue:
+      num_consumers: 4
+      queue_size: 100
+
+  # Prints a summary of exported data to stdout. Remove in production if noisy.
+  debug:
+    verbosity: normal
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [resourcedetection, batch]
+      exporters: [otlphttp/traces, debug]
+
+    metrics:
+      receivers: [otlp, hostmetrics]
+      processors: [resourcedetection, batch]
+      exporters: [otlphttp/metrics]
+
+    logs:
+      receivers: [otlp]
+      processors: [resourcedetection, batch]
+      exporters: [otlphttp/logs]

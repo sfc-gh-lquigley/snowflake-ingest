@@ -41,6 +41,38 @@ logging.basicConfig(
 log = logging.getLogger("pipeline_simulator")
 
 
+def create_apm_hidden_meter_provider():
+    """MeterProvider with no service.name and no SDK auto-detection.
+    Metrics flow normally but Observe will not create an APM service node.
+    Use for sources that should be observable via metrics/logs only."""
+    resource = Resource({
+        "deployment.environment": DEPLOYMENT_ENV,
+        "service.namespace": SERVICE_NAMESPACE,
+    })
+    return MeterProvider(
+        resource=resource,
+        metric_readers=[PeriodicExportingMetricReader(
+            OTLPMetricExporter(endpoint=f"{OTEL_ENDPOINT}/v1/metrics"),
+            export_interval_millis=30000,
+        )],
+    )
+
+
+def create_apm_hidden_logger_provider(service_name):
+    """LoggerProvider with service.name (for log filtering) but no SDK auto-detection.
+    Avoids telemetry.sdk.language=python so Observe does not create an APM catalog entry."""
+    resource = Resource({
+        "service.name": service_name,
+        "service.namespace": SERVICE_NAMESPACE,
+        "deployment.environment": DEPLOYMENT_ENV,
+    })
+    logger_provider = LoggerProvider(resource=resource)
+    logger_provider.add_log_record_processor(
+        BatchLogRecordProcessor(OTLPLogExporter(endpoint=f"{OTEL_ENDPOINT}/v1/logs"))
+    )
+    return logger_provider
+
+
 def create_service_telemetry(service_name):
     """Create an isolated OTel stack (TracerProvider, MeterProvider, LoggerProvider)
     for a single logical service, with service.name set in the Resource."""
@@ -153,12 +185,14 @@ async def main():
     airflow_sched_tp, airflow_sched_mp, airflow_sched_lp = create_service_telemetry("airflow-scheduler")
     airflow_worker_tp, _,               airflow_worker_lp = create_service_telemetry("airflow-worker")
     dbt_tp,           dbt_mp,           dbt_lp            = create_service_telemetry("dbt-cloud")
-    _,                fivetran_mp,      fivetran_lp       = create_service_telemetry("fivetran-connector")
-    _,                snowpipe_mp,      snowpipe_lp       = create_service_telemetry("snowpipe-ingest")
-    # "snowflake-monitor" keeps warehouse metrics isolated from the inferred "snowflake" node.
-    # Using service.name="snowflake" here would tag the resource with telemetry.sdk.language=python
-    # and cause Observe to display a Python badge on the inferred snowflake service node.
-    _,                wh_monitor_mp,    _                 = create_service_telemetry("snowflake-monitor")
+    # Fivetran, Snowpipe, and warehouse metrics use APM-hidden providers:
+    # Resource() directly (no SDK auto-detection) so Observe does not create
+    # APM service nodes for these metrics-only sources.
+    fivetran_mp  = create_apm_hidden_meter_provider()
+    fivetran_lp  = create_apm_hidden_logger_provider("fivetran-connector")
+    snowpipe_mp  = create_apm_hidden_meter_provider()
+    snowpipe_lp  = create_apm_hidden_logger_provider("snowpipe-ingest")
+    wh_monitor_mp = create_apm_hidden_meter_provider()
     alertmgr_tp,      _,                alertmgr_lp       = create_service_telemetry("alertmanager")
 
     log_emitter = StructuredLogEmitter({
